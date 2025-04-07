@@ -31,27 +31,58 @@ from sklearn.metrics import accuracy_score, classification_report
 from google.colab import files
 from IPython.display import display
 
-def upload_images():
+def upload_images(by_class=False):
     """
     Google Colabでファイルをアップロードする関数
     
+    Args:
+        by_class (bool): クラスごとにファイルをアップロードするかどうか
+    
     Returns:
         uploaded_files (dict): アップロードされたファイル名と画像オブジェクトの辞書
+        labels (dict, optional): 画像ファイル名とラベルの辞書（by_class=Trueの場合のみ）
     """
-    print("画像ファイルをアップロードしてください。")
-    uploaded = files.upload()
-    
     uploaded_files = {}
-    for filename in uploaded.keys():
-        try:
-            img = Image.open(filename)
-            uploaded_files[filename] = img
-            print(f"ファイル '{filename}' を読み込みました。サイズ: {img.size}")
-            display(img)
-        except Exception as e:
-            print(f"ファイル '{filename}' の読み込みに失敗しました: {e}")
+    labels = {}
     
-    return uploaded_files
+    if by_class:
+        print("クラスごとに画像をアップロードします。")
+        continue_upload = True
+        
+        while continue_upload:
+            class_name = input("クラス名を入力してください: ")
+            print(f"クラス '{class_name}' の画像ファイルをアップロードしてください。")
+            uploaded = files.upload()
+            
+            for filename in uploaded.keys():
+                try:
+                    img = Image.open(filename)
+                    uploaded_files[filename] = img
+                    labels[filename] = class_name
+                    print(f"ファイル '{filename}' を読み込みました。サイズ: {img.size}, クラス: {class_name}")
+                    display(img)
+                except Exception as e:
+                    print(f"ファイル '{filename}' の読み込みに失敗しました: {e}")
+            
+            continue_input = input("別のクラスの画像をアップロードしますか？ (y/n) [デフォルト: y]: ").lower()
+            continue_upload = continue_input != 'n'
+        
+        print(f"合計 {len(uploaded_files)} 個の画像を {len(set(labels.values()))} クラスにアップロードしました。")
+        return uploaded_files, labels
+    else:
+        print("画像ファイルをアップロードしてください。")
+        uploaded = files.upload()
+        
+        for filename in uploaded.keys():
+            try:
+                img = Image.open(filename)
+                uploaded_files[filename] = img
+                print(f"ファイル '{filename}' を読み込みました。サイズ: {img.size}")
+                display(img)
+            except Exception as e:
+                print(f"ファイル '{filename}' の読み込みに失敗しました: {e}")
+        
+        return uploaded_files
 
 def extract_features_pytorch(images, model_name='resnet50', layer='avgpool'):
     """
@@ -325,9 +356,19 @@ def train_classifier(X, y, classifier_type='svm', test_size=0.2, random_state=42
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=test_size, random_state=random_state, stratify=y
-    )
+    unique_classes, class_counts = np.unique(y, return_counts=True)
+    min_samples_per_class = np.min(class_counts)
+    
+    if min_samples_per_class >= 2:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=test_size, random_state=random_state, stratify=y
+        )
+        print("層別サンプリングを使用してデータを分割しました。")
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=test_size, random_state=random_state, stratify=None
+        )
+        print("警告: 一部のクラスのサンプル数が少ないため、層別サンプリングを使用せずにデータを分割しました。")
     
     print(f"訓練データ: {X_train.shape[0]}サンプル, テストデータ: {X_test.shape[0]}サンプル")
     
@@ -397,7 +438,13 @@ def main():
     print("=" * 50)
     
     print("\n## 画像のアップロード")
-    images = upload_images()
+    upload_by_class = input("クラスごとに画像をアップロードしますか？ (y/n) [デフォルト: y]: ").lower() != 'n'
+    
+    if upload_by_class:
+        images, labels = upload_images(by_class=True)
+    else:
+        images = upload_images(by_class=False)
+        labels = None
     
     if not images:
         print("画像がアップロードされていません。処理を終了します。")
@@ -446,14 +493,17 @@ def main():
     print("\n## 分類タスク")
     classify = input("特徴量を使用して分類器を訓練しますか？ (y/n) [デフォルト: y]: ").lower()
     if classify != 'n':
-        X, y, label_map = prepare_data_for_classification(features)
+        if upload_by_class and labels:
+            X, y, label_map = prepare_data_for_classification(features, labels)
+        else:
+            X, y, label_map = prepare_data_for_classification(features)
         
         classifier, X_train, X_test, y_train, y_test, scaler = train_classifier(X, y)
         
         classify_new = input("\n新しい画像をアップロードして分類しますか？ (y/n) [デフォルト: n]: ").lower()
         if classify_new == 'y':
             print("\n## 新しい画像のアップロード")
-            new_images = upload_images()
+            new_images = upload_images(by_class=False)
             
             if new_images:
                 print("\n## 新しい画像の分類")
