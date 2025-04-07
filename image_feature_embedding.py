@@ -102,9 +102,21 @@ def extract_features_pytorch(images, model_name='resnet50', layer='avgpool'):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     
+    preprocess_grayscale = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.Grayscale(num_output_channels=3),  # グレースケールをRGB形式に変換
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    
     features = {}
     for filename, img in images.items():
-        input_tensor = preprocess(img)
+        if img.mode == 'L' or img.mode == '1':
+            input_tensor = preprocess_grayscale(img)
+        else:
+            input_tensor = preprocess(img)
+            
         input_batch = input_tensor.unsqueeze(0)
         
         with torch.no_grad():
@@ -156,6 +168,9 @@ def extract_features_tensorflow(images, model_name='resnet50', include_top=False
     
     features = {}
     for filename, img in images.items():
+        if img.mode == 'L' or img.mode == '1':
+            img = img.convert('RGB')
+            
         img_array = img.resize(target_size)
         img_array = np.array(img_array)
         img_array = np.expand_dims(img_array, axis=0)
