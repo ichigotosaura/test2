@@ -31,6 +31,12 @@ from sklearn.metrics import accuracy_score, classification_report
 from google.colab import files
 from IPython.display import display
 
+import gudhi as gd
+import ripser
+import persim
+from gudhi.representations import Landscape, PersistenceImage
+from scipy.ndimage import gaussian_filter, sobel
+
 def upload_images(by_class=False):
     """
     Google Colabでファイルをアップロードする関数
@@ -433,8 +439,9 @@ def classify_new_images(classifier, scaler, images, extract_func, model_name='re
 def main():
     """
     画像特徴量抽出と分類の実行フロー
+    パーシステントホモロジーを用いたナノ構造解析機能を追加
     """
-    print("画像の特徴量抽出・分類ツール")
+    print("画像の特徴量抽出・分類・パーシステントホモロジー解析ツール")
     print("=" * 50)
     
     print("\n## 画像のアップロード")
@@ -519,6 +526,299 @@ def main():
         if not filename:
             filename = 'image_features.npy'
         save_features(features, filename=filename)
+        
+    print("\n## 追加解析オプション")
+    analyze_with_ph = input("パーシステントホモロジーを用いて解析しますか？ (y/n) [デフォルト: n]: ").lower()
+    if analyze_with_ph == 'y':
+        ph_method = input("解析手法を選択してください (persistence/multi_scale/combined) [デフォルト: combined]: ")
+        if not ph_method or ph_method not in ['persistence', 'multi_scale', 'combined']:
+            ph_method = 'combined'
+        
+        results = analyze_nano_structure(images, method=ph_method)
+
+def image_to_point_cloud(img, method='gradient', sigma=1.0, threshold=None, max_points=1000):
+    """
+    画像をポイントクラウドに変換する関数
+    
+    Args:
+        img (PIL.Image): 入力画像
+        method (str): 変換手法 ('gradient', 'intensity', 'canny')
+        sigma (float): ガウスぼかしのパラメータ
+        threshold (float): 閾値（Noneの場合は自動設定）
+        max_points (int): 最大点数
+    
+    Returns:
+        point_cloud (numpy.ndarray): 2D/3D点群データ
+    """
+    if img.mode != 'L':
+        img_gray = img.convert('L')
+    else:
+        img_gray = img
+    
+    img_array = np.array(img_gray).astype(float) / 255.0
+    
+    img_blurred = gaussian_filter(img_array, sigma=sigma)
+    
+    if method == 'gradient':
+        gradient_x = sobel(img_blurred, axis=0)
+        gradient_y = sobel(img_blurred, axis=1)
+        gradient_magnitude = np.sqrt(gradient_x**2 + gradient_y**2)
+        
+        if threshold is None:
+            threshold = np.percentile(gradient_magnitude, 75)
+        mask = gradient_magnitude > threshold
+    
+    elif method == 'intensity':
+        if threshold is None:
+            threshold = np.percentile(img_blurred, 75)
+        mask = img_blurred > threshold
+    
+    points_y, points_x = np.where(mask)
+    
+    if len(points_y) > max_points:
+        indices = np.random.choice(len(points_y), max_points, replace=False)
+        points_y = points_y[indices]
+        points_x = points_x[indices]
+    
+    point_cloud = np.column_stack((points_x, points_y))
+    
+    return point_cloud
+
+def multi_scale_filtration(img, scales=[1.0, 2.0, 4.0], method='sublevel', max_dim=1):
+    """
+    画像に対して複数のスケールでフィルトレーションを適用する革新的な関数
+    
+    Args:
+        img (PIL.Image): 入力画像
+        scales (list): スケールのリスト
+        method (str): フィルトレーション手法 ('sublevel', 'density', 'dtm')
+        max_dim (int): 計算する最大次元
+    
+    Returns:
+        filtrations (list): 各スケールのフィルトレーション
+    """
+    if img.mode != 'L':
+        img_gray = img.convert('L')
+    else:
+        img_gray = img
+    
+    img_array = np.array(img_gray).astype(float) / 255.0
+    
+    filtrations = []
+    
+    for scale in scales:
+        img_scaled = gaussian_filter(img_array, sigma=scale)
+        
+        if method == 'sublevel':
+            cubical_complex = gd.CubicalComplex(
+                dimensions=[img_scaled.shape[0], img_scaled.shape[1]],
+                top_dimensional_cells=img_scaled.flatten()
+            )
+            cubical_complex.compute_persistence(homology_coeff_field=2, min_persistence=0.0)
+            
+            filtrations.append({
+                'scale': scale,
+                'complex': cubical_complex,
+                'diagram': cubical_complex.persistence_intervals_in_dimension(0) + 
+                           cubical_complex.persistence_intervals_in_dimension(1)
+            })
+        
+        elif method == 'density':
+            point_cloud = image_to_point_cloud(Image.fromarray((img_scaled * 255).astype(np.uint8)))
+            
+            rips_complex = gd.RipsComplex(points=point_cloud, max_edge_length=30)
+            simplex_tree = rips_complex.create_simplex_tree(max_dimension=max_dim)
+            simplex_tree.compute_persistence(homology_coeff_field=2, min_persistence=0.0)
+            
+            filtrations.append({
+                'scale': scale,
+                'complex': simplex_tree,
+                'diagram': simplex_tree.persistence_intervals_in_dimension(0) + 
+                           simplex_tree.persistence_intervals_in_dimension(1)
+            })
+    
+    return filtrations
+
+def compute_persistence_homology(img, method='cubical', max_dim=1, max_edge_length=30):
+    """
+    画像からパーシステントホモロジーを計算する関数
+    
+    Args:
+        img (PIL.Image): 入力画像
+        method (str): 'cubical'/'rips'/'alpha'
+        max_dim (int): 計算する最大次元
+        max_edge_length (float): Rips複体の最大辺長
+    
+    Returns:
+        dgm (list): パーシステンスダイアグラム
+    """
+    if img.mode != 'L':
+        img_gray = img.convert('L')
+    else:
+        img_gray = img
+    
+    img_array = np.array(img_gray).astype(float) / 255.0
+    
+    if method == 'cubical':
+        cubical_complex = gd.CubicalComplex(
+            dimensions=[img_array.shape[0], img_array.shape[1]],
+            top_dimensional_cells=img_array.flatten()
+        )
+        cubical_complex.compute_persistence(homology_coeff_field=2, min_persistence=0.0)
+        
+        dgms = [cubical_complex.persistence_intervals_in_dimension(i) for i in range(max_dim + 1)]
+        
+    elif method == 'rips':
+        point_cloud = image_to_point_cloud(img)
+        
+        dgms = ripser.ripser(point_cloud, maxdim=max_dim, thresh=max_edge_length)['dgms']
+    
+    return dgms
+
+def combine_dl_tda_features(images, dl_model_name='resnet50', framework='pytorch', persistence_method='cubical'):
+    """
+    深層学習特徴量と位相的データ解析特徴量を組み合わせる革新的な関数
+    
+    Args:
+        images (dict): 画像ファイル名と画像オブジェクトの辞書
+        dl_model_name (str): 深層学習モデル名
+        framework (str): フレームワーク ('pytorch'/'tensorflow')
+        persistence_method (str): パーシステントホモロジー計算手法
+    
+    Returns:
+        combined_features (dict): 画像ファイル名と組み合わせた特徴量の辞書
+    """
+    if framework == 'pytorch':
+        dl_features = extract_features_pytorch(images, model_name=dl_model_name)
+    else:
+        dl_features = extract_features_tensorflow(images, model_name=dl_model_name)
+    
+    tda_features = {}
+    for filename, img in images.items():
+        dgms = compute_persistence_homology(img, method=persistence_method)
+        
+        landscapes = []
+        for dim in range(len(dgms)):
+            if len(dgms[dim]) > 0:
+                dgm = dgms[dim]
+                landscape = Landscape(num_landscapes=5, resolution=100)
+                landscape_features = landscape.fit_transform([dgm])
+                landscapes.append(landscape_features.flatten())
+            else:
+                landscapes.append(np.zeros(5 * 100))  # 空のダイアグラムの場合
+        
+        pimages = []
+        for dim in range(len(dgms)):
+            if len(dgms[dim]) > 0:
+                dgm = dgms[dim]
+                pimage = PersistenceImage(resolution=[20, 20])
+                pimage_features = pimage.fit_transform([dgm])
+                pimages.append(pimage_features.flatten())
+            else:
+                pimages.append(np.zeros(20 * 20))  # 空のダイアグラムの場合
+        
+        tda_features[filename] = np.concatenate(landscapes + pimages)
+    
+    combined_features = {}
+    for filename in images.keys():
+        combined_features[filename] = np.concatenate([dl_features[filename], tda_features[filename]])
+    
+    return combined_features
+
+def visualize_persistence_diagrams(dgms, title=None):
+    """
+    パーシステンスダイアグラムを可視化する関数
+    
+    Args:
+        dgms (list): パーシステンスダイアグラムのリスト
+        title (str): グラフのタイトル
+    """
+    n_dims = len(dgms)
+    fig, axes = plt.subplots(1, n_dims, figsize=(5 * n_dims, 5))
+    
+    if n_dims == 1:
+        axes = [axes]
+    
+    for i, dgm in enumerate(dgms):
+        persim.plot_diagrams(dgm, ax=axes[i])
+        axes[i].set_title(f'Dimension {i}')
+        
+        if len(dgm) > 0:
+            inf_points = np.where(np.isinf(dgm[:, 1]))[0]
+            if len(inf_points) > 0:
+                inf_y_coords = np.max(dgm[~np.isinf(dgm[:, 1]), 1]) * 1.2
+                axes[i].scatter(dgm[inf_points, 0], np.ones(len(inf_points)) * inf_y_coords, 
+                             marker='v', color='r', label='Inf')
+                axes[i].legend()
+    
+    fig.suptitle(title if title else 'Persistence Diagrams')
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
+def analyze_nano_structure(images, method='combined'):
+    """
+    ナノ構造画像を解析する関数
+    
+    Args:
+        images (dict): 画像ファイル名と画像オブジェクトの辞書
+        method (str): 解析手法 ('persistence', 'multi_scale', 'combined')
+    
+    Returns:
+        results (dict): 解析結果
+    """
+    results = {}
+    
+    if method == 'persistence':
+        for filename, img in images.items():
+            dgms = compute_persistence_homology(img)
+            fig = visualize_persistence_diagrams(dgms, title=f'Persistence Diagram for {filename}')
+            
+            features = []
+            for dim, dgm in enumerate(dgms):
+                if len(dgm) > 0:
+                    persistences = dgm[:, 1] - dgm[:, 0]
+                    persistences = persistences[~np.isinf(persistences)]
+                    
+                    if len(persistences) > 0:
+                        stats = {
+                            'mean': np.mean(persistences),
+                            'std': np.std(persistences),
+                            'max': np.max(persistences),
+                            'count': len(persistences)
+                        }
+                        features.append(stats)
+                    else:
+                        features.append({'mean': 0, 'std': 0, 'max': 0, 'count': 0})
+            
+            results[filename] = {
+                'dgms': dgms,
+                'features': features
+            }
+    
+    elif method == 'multi_scale':
+        for filename, img in images.items():
+            filtrations = multi_scale_filtration(img)
+            multi_scale_features = []
+            
+            for filtration in filtrations:
+                scale = filtration['scale']
+                diagram = filtration['diagram']
+                multi_scale_features.append({
+                    'scale': scale,
+                    'diagram': diagram
+                })
+            
+            results[filename] = {
+                'multi_scale_features': multi_scale_features
+            }
+    
+    elif method == 'combined':
+        combined_features = combine_dl_tda_features(images)
+        results = combined_features
+    
+    return results
 
 if __name__ == "__main__":
     main()
